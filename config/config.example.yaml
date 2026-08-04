@@ -1,0 +1,46 @@
+app:
+  name: hopper
+  env: development
+  shutdown_timeout: 30s
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  read_timeout: 10s
+  write_timeout: 10s
+  body_limit: 1M
+
+database:
+  host: localhost
+  port: 5432
+  user: hopper
+  password: hopper
+  name: hopper
+  sslmode: disable
+  max_conns: 25
+  min_conns: 5
+  max_conn_lifetime: 1h
+
+worker:
+  id: ""
+  queues: [default]
+  concurrency: 10
+  batch_size: 10
+  poll_interval: 1s
+  lease_ttl: 30s
+  heartbeat_interval: 10s
+  job_timeout: 5m
+
+reaper:
+  interval: 10s
+  batch_size: 100
+
+retry:
+  max_attempts: 5
+  base_delay: 10s
+  max_delay: 1h
+  jitter: 0.2
+
+log:
+  level: info
+  format: json
