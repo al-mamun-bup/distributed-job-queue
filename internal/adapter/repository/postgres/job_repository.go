@@ -33,28 +33,63 @@ func (r *JobRepository) Enqueue(ctx context.Context, input port.EnqueueInput) (d
 		input.RunAt = time.Now().UTC()
 	}
 
-	const query = `
-		INSERT INTO jobs (id, queue, payload, state, attempts, max_attempts, run_at, idempotency_key, created_at, updated_at)
-		VALUES ($1, $2, $3::jsonb, 'pending', 0, $4, $5, $6, now(), now())
-		ON CONFLICT (queue, idempotency_key) WHERE idempotency_key IS NOT NULL
-		DO UPDATE SET idempotency_key = jobs.idempotency_key
-		RETURNING id, queue, payload, state, attempts, max_attempts, run_at, lease_expires_at, worker_id, idempotency_key, last_error, created_at, updated_at, completed_at
-	`
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.Job{}, fmt.Errorf("starting enqueue transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	row := r.pool.QueryRow(
-		ctx,
-		query,
-		id,
-		string(input.Queue),
-		string(input.Payload),
-		input.MaxAttempts,
-		input.RunAt,
-		input.IdempotencyKey,
+	var (
+		job      domain.Job
+		inserted bool
 	)
 
-	job, err := scanJob(row)
-	if err != nil {
-		return domain.Job{}, fmt.Errorf("enqueueing job: %w", err)
+	if input.IdempotencyKey == nil {
+		const insertQuery = `
+			INSERT INTO jobs (id, queue, payload, state, attempts, max_attempts, run_at, idempotency_key, created_at, updated_at)
+			VALUES ($1, $2, $3::jsonb, 'pending', 0, $4, $5, NULL, now(), now())
+			RETURNING id, queue, payload, state, attempts, max_attempts, run_at, lease_expires_at, worker_id, idempotency_key, last_error, created_at, updated_at, completed_at
+		`
+		row := tx.QueryRow(ctx, insertQuery, id, string(input.Queue), string(input.Payload), input.MaxAttempts, input.RunAt)
+		job, err = scanJob(row)
+		if err != nil {
+			return domain.Job{}, fmt.Errorf("inserting job: %w", err)
+		}
+		inserted = true
+	} else {
+		const insertOrGetQuery = `
+			WITH inserted AS (
+				INSERT INTO jobs (id, queue, payload, state, attempts, max_attempts, run_at, idempotency_key, created_at, updated_at)
+				VALUES ($1, $2, $3::jsonb, 'pending', 0, $4, $5, $6, now(), now())
+				ON CONFLICT (queue, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+				RETURNING id, queue, payload, state, attempts, max_attempts, run_at, lease_expires_at, worker_id, idempotency_key, last_error, created_at, updated_at, completed_at, true AS inserted
+			)
+			SELECT id, queue, payload, state, attempts, max_attempts, run_at, lease_expires_at, worker_id, idempotency_key, last_error, created_at, updated_at, completed_at, inserted
+			FROM inserted
+			UNION ALL
+			SELECT id, queue, payload, state, attempts, max_attempts, run_at, lease_expires_at, worker_id, idempotency_key, last_error, created_at, updated_at, completed_at, false AS inserted
+			FROM jobs
+			WHERE queue = $2 AND idempotency_key = $6
+			LIMIT 1
+		`
+
+		var rowInserted bool
+		row := tx.QueryRow(ctx, insertOrGetQuery, id, string(input.Queue), string(input.Payload), input.MaxAttempts, input.RunAt, input.IdempotencyKey)
+		job, rowInserted, err = scanJobWithInserted(row)
+		if err != nil {
+			return domain.Job{}, fmt.Errorf("upserting job by idempotency key: %w", err)
+		}
+		inserted = rowInserted
+	}
+
+	if inserted {
+		if _, err := tx.Exec(ctx, `SELECT pg_notify('jobs_new', $1)`, string(input.Queue)); err != nil {
+			return domain.Job{}, fmt.Errorf("notifying enqueue for queue %s: %w", input.Queue, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Job{}, fmt.Errorf("committing enqueue transaction: %w", err)
 	}
 
 	return job, nil
@@ -180,6 +215,35 @@ func (r *JobRepository) ExtendLease(ctx context.Context, id string, workerID str
 		return fmt.Errorf("extending lease for job %s: %w", id, domain.ErrJobNotFound)
 	}
 	return nil
+}
+
+func (r *JobRepository) ReleaseLeases(ctx context.Context, workerID string, jobIDs []string) (int64, error) {
+	if len(jobIDs) == 0 {
+		return 0, nil
+	}
+
+	const query = `
+		UPDATE jobs
+		SET state = 'pending',
+		    lease_expires_at = NULL,
+		    worker_id = NULL,
+		    updated_at = now()
+		WHERE id = ANY($1::uuid[]) AND state = 'running' AND worker_id = $2
+	`
+
+	validatedIDs := make([]string, 0, len(jobIDs))
+	for _, jobID := range jobIDs {
+		if _, err := uuid.Parse(jobID); err != nil {
+			return 0, fmt.Errorf("parsing job id %s for release: %w", jobID, err)
+		}
+		validatedIDs = append(validatedIDs, jobID)
+	}
+
+	cmdTag, err := r.pool.Exec(ctx, query, validatedIDs, workerID)
+	if err != nil {
+		return 0, fmt.Errorf("releasing leases for worker %s: %w", workerID, err)
+	}
+	return cmdTag.RowsAffected(), nil
 }
 
 func (r *JobRepository) ReapExpired(ctx context.Context, batchSize int) ([]domain.Job, error) {
@@ -321,6 +385,55 @@ func scanJob(row scanner) (domain.Job, error) {
 	}
 
 	return job, nil
+}
+
+func scanJobWithInserted(row scanner) (domain.Job, bool, error) {
+	var (
+		job            domain.Job
+		queue          string
+		state          string
+		payload        []byte
+		leaseExpiresAt *time.Time
+		workerID       *string
+		idempotencyKey *string
+		lastError      *string
+		completedAt    *time.Time
+		inserted       bool
+	)
+
+	if err := row.Scan(
+		&job.ID,
+		&queue,
+		&payload,
+		&state,
+		&job.Attempts,
+		&job.MaxAttempts,
+		&job.RunAt,
+		&leaseExpiresAt,
+		&workerID,
+		&idempotencyKey,
+		&lastError,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&completedAt,
+		&inserted,
+	); err != nil {
+		return domain.Job{}, false, fmt.Errorf("scanning job row with inserted flag: %w", err)
+	}
+
+	compactPayload := json.RawMessage(payload)
+	job.Payload = append([]byte(nil), compactPayload...)
+	job.Queue = domain.Queue(queue)
+	job.State = domain.JobState(state)
+	job.LeaseExpiresAt = leaseExpiresAt
+	job.WorkerID = workerID
+	job.IdempotencyKey = idempotencyKey
+	job.CompletedAt = completedAt
+	if lastError != nil {
+		job.LastError = *lastError
+	}
+
+	return job, inserted, nil
 }
 
 func toPostgresInterval(value time.Duration) string {

@@ -42,6 +42,7 @@ type JobRepository interface {
 	Complete(ctx context.Context, id string, workerID string, completedAt time.Time) error
 	Fail(ctx context.Context, input FailInput) error
 	ExtendLease(ctx context.Context, id string, workerID string, leaseTTL time.Duration) error
+	ReleaseLeases(ctx context.Context, workerID string, jobIDs []string) (int64, error)
 	ReapExpired(ctx context.Context, batchSize int) ([]domain.Job, error)
 	Get(ctx context.Context, id string) (domain.Job, error)
 	Stats(ctx context.Context, queue domain.Queue) (QueueStats, error)
