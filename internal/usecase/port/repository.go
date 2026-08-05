@@ -35,6 +35,19 @@ type QueueStats struct {
 	UpdatedAt time.Time
 }
 
+// Notifier wakes a waiting worker when a new job may be available. It is a
+// latency optimisation, not a delivery guarantee: a dropped or missed signal
+// must never lose a job, since run_at <= now() polling is what actually
+// guarantees delivery.
+type Notifier interface {
+	// Notifications delivers a best-effort wake-up signal per notification
+	// received; it carries no payload, only "something changed, go check".
+	Notifications() <-chan struct{}
+	// Run holds the listener connection until ctx is done, reconnecting
+	// with backoff on drop. It returns nil on ctx cancellation.
+	Run(ctx context.Context) error
+}
+
 // JobRepository persists and claims jobs from durable storage.
 type JobRepository interface {
 	Enqueue(ctx context.Context, input EnqueueInput) (domain.Job, error)

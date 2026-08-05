@@ -59,7 +59,12 @@ func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		queues = append(queues, domain.Queue(queue))
 	}
 
-	worker, err := job.NewWorker(repository, processor, defaultHandler(log), job.WorkerConfig{
+	notifier, err := postgresrepo.NewQueueListener(pool, postgresrepo.NewJobChannel)
+	if err != nil {
+		return fmt.Errorf("creating queue listener: %w", err)
+	}
+
+	worker, err := job.NewWorker(repository, processor, defaultHandler(log), notifier, job.WorkerConfig{
 		WorkerID:        cfg.Worker.ID,
 		Queues:          queues,
 		Concurrency:     cfg.Worker.Concurrency,

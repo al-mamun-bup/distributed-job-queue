@@ -52,7 +52,7 @@ func TestWorkerGracefulShutdownMidBatchNoLossNoDuplicates(t *testing.T) {
 	}
 
 	processor1 := NewProcessor(repository, retryPolicy)
-	worker1, err := NewWorker(repository, processor1, handler, WorkerConfig{
+	worker1, err := NewWorker(repository, processor1, handler, nil, WorkerConfig{
 		WorkerID:        "worker-a",
 		Queues:          []domain.Queue{"default"},
 		Concurrency:     10,
@@ -75,7 +75,7 @@ func TestWorkerGracefulShutdownMidBatchNoLossNoDuplicates(t *testing.T) {
 	require.NoError(t, <-worker1Done)
 
 	processor2 := NewProcessor(repository, retryPolicy)
-	worker2, err := NewWorker(repository, processor2, handler, WorkerConfig{
+	worker2, err := NewWorker(repository, processor2, handler, nil, WorkerConfig{
 		WorkerID:        "worker-b",
 		Queues:          []domain.Queue{"default"},
 		Concurrency:     10,
@@ -163,7 +163,7 @@ func TestWorkerRecoversPanicAndKeepsRunning(t *testing.T) {
 	}
 
 	processor := NewProcessor(repository, retryPolicy)
-	worker, err := NewWorker(repository, processor, handler, WorkerConfig{
+	worker, err := NewWorker(repository, processor, handler, nil, WorkerConfig{
 		WorkerID:        "worker-panic-test",
 		Queues:          []domain.Queue{"default"},
 		Concurrency:     2,

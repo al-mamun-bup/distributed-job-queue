@@ -10,6 +10,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// NewJobChannel is the pg_notify/LISTEN channel enqueue signals on. Shared
+// with JobRepository.Enqueue so the notifier and the writer can't drift.
+const NewJobChannel = "jobs_new"
+
 var listenChannelNamePattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 type QueueListener struct {

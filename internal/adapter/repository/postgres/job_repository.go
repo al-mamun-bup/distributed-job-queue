@@ -83,7 +83,7 @@ func (r *JobRepository) Enqueue(ctx context.Context, input port.EnqueueInput) (d
 	}
 
 	if inserted {
-		if _, err := tx.Exec(ctx, `SELECT pg_notify('jobs_new', $1)`, string(input.Queue)); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, NewJobChannel, string(input.Queue)); err != nil {
 			return domain.Job{}, fmt.Errorf("notifying enqueue for queue %s: %w", input.Queue, err)
 		}
 	}

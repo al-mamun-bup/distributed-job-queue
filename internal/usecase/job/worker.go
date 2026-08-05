@@ -27,10 +27,13 @@ type Worker struct {
 	repository port.JobRepository
 	processor  *Processor
 	handler    HandlerFunc
+	notifier   port.Notifier
 	cfg        WorkerConfig
 }
 
-func NewWorker(repository port.JobRepository, processor *Processor, handler HandlerFunc, cfg WorkerConfig) (*Worker, error) {
+// NewWorker wires a claim loop for cfg.Queues. notifier may be nil, in which
+// case the worker falls back to pure polling at PollInterval.
+func NewWorker(repository port.JobRepository, processor *Processor, handler HandlerFunc, notifier port.Notifier, cfg WorkerConfig) (*Worker, error) {
 	if handler == nil {
 		return nil, fmt.Errorf("creating worker: handler is required")
 	}
@@ -63,6 +66,7 @@ func NewWorker(repository port.JobRepository, processor *Processor, handler Hand
 		repository: repository,
 		processor:  processor,
 		handler:    handler,
+		notifier:   notifier,
 		cfg:        cfg,
 	}, nil
 }
@@ -108,6 +112,20 @@ func (w *Worker) Run(ctx context.Context) error {
 		maxBackoff = pollBackoff
 	}
 
+	// NOTIFY is a latency optimisation on top of polling, not a replacement
+	// for it: pg_notify is fire-and-forget, so a signal sent while no
+	// listener connection is up is gone forever, and delayed/backoff jobs
+	// only ever become visible via run_at <= now(). The poll timer below
+	// stays the correctness floor; notifications only let us skip waiting
+	// out the rest of pollBackoff when one arrives.
+	var notifications <-chan struct{}
+	if w.notifier != nil {
+		notifications = w.notifier.Notifications()
+		go func() {
+			_ = w.notifier.Run(claimCtx)
+		}()
+	}
+
 	claimErrCh := make(chan error, 1)
 	go func() {
 		defer close(claimErrCh)
@@ -143,10 +161,17 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 
 			if len(jobs) == 0 {
-				time.Sleep(pollBackoff)
-				pollBackoff *= 2
-				if pollBackoff > maxBackoff {
-					pollBackoff = maxBackoff
+				select {
+				case <-claimCtx.Done():
+					return
+				case <-notifications:
+					// Woken early: something was enqueued, go check right away.
+					pollBackoff = 10 * time.Millisecond
+				case <-time.After(pollBackoff):
+					pollBackoff *= 2
+					if pollBackoff > maxBackoff {
+						pollBackoff = maxBackoff
+					}
 				}
 				continue
 			}
