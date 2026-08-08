@@ -207,6 +207,14 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 	case <-ctx.Done():
 		stopClaim()
+		// Wait for the claim loop goroutine to actually exit before
+		// touching wg below. Without this, a batch it already claimed
+		// could still be mid wg.Add() concurrently with wg.Wait(),
+		// which is a data race on the WaitGroup's internal counter -
+		// checking claimCtx.Done() only at the top of its loop isn't
+		// enough on its own. claimErrCh is closed on return, so this
+		// receive blocks exactly until that happens.
+		<-claimErrCh
 	}
 
 	done := make(chan struct{})

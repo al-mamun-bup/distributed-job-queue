@@ -18,7 +18,7 @@ test-int:
 	go test -race -tags=integration ./...
 
 lint:
-	go run github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8 run
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
 
 migrate-up:
 	go run ./cmd/migrate up

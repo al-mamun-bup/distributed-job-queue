@@ -25,6 +25,22 @@ type FailInput struct {
 	CompletedAt *time.Time
 }
 
+// ListJobsInput filters a paginated job listing. Nil Queue/State mean
+// "any". Limit <= 0 falls back to a repository-chosen default.
+type ListJobsInput struct {
+	Queue  *domain.Queue
+	State  *domain.JobState
+	Limit  int
+	Offset int
+}
+
+// ListJobsOutput is a page of jobs plus the total matching row count, so
+// callers can render pagination without a second round trip.
+type ListJobsOutput struct {
+	Jobs  []domain.Job
+	Total int64
+}
+
 type QueueStats struct {
 	Queue     string
 	Pending   int64
@@ -58,5 +74,9 @@ type JobRepository interface {
 	ReleaseLeases(ctx context.Context, workerID string, jobIDs []string) (int64, error)
 	ReapExpired(ctx context.Context, batchSize int) ([]domain.Job, error)
 	Get(ctx context.Context, id string) (domain.Job, error)
+	List(ctx context.Context, input ListJobsInput) (ListJobsOutput, error)
+	// Retry resurrects a dead job back to pending. Returns ErrInvalidTransition
+	// if the job exists but isn't dead, ErrJobNotFound if it doesn't exist.
+	Retry(ctx context.Context, id string) (domain.Job, error)
 	Stats(ctx context.Context, queue domain.Queue) (QueueStats, error)
 }

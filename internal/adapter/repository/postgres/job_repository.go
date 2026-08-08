@@ -301,6 +301,116 @@ func (r *JobRepository) Get(ctx context.Context, id string) (domain.Job, error) 
 	return job, nil
 }
 
+func (r *JobRepository) List(ctx context.Context, input port.ListJobsInput) (port.ListJobsOutput, error) {
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := input.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	var queue *string
+	if input.Queue != nil {
+		q := string(*input.Queue)
+		queue = &q
+	}
+	var state *string
+	if input.State != nil {
+		s := string(*input.State)
+		state = &s
+	}
+
+	const query = `
+		SELECT id, queue, payload, state, attempts, max_attempts, run_at, lease_expires_at, worker_id, idempotency_key, last_error, created_at, updated_at, completed_at,
+		       COUNT(*) OVER()::bigint AS total
+		FROM jobs
+		WHERE ($1::text IS NULL OR queue = $1)
+		  AND ($2::job_state IS NULL OR state = $2::job_state)
+		ORDER BY created_at DESC, id
+		LIMIT $3 OFFSET $4
+	`
+
+	rows, err := r.pool.Query(ctx, query, queue, state, limit, offset)
+	if err != nil {
+		return port.ListJobsOutput{}, fmt.Errorf("listing jobs: %w", err)
+	}
+	defer rows.Close()
+
+	out := port.ListJobsOutput{Jobs: make([]domain.Job, 0, limit)}
+	for rows.Next() {
+		job, total, err := scanJobWithTotal(rows)
+		if err != nil {
+			return port.ListJobsOutput{}, fmt.Errorf("scanning listed job: %w", err)
+		}
+		out.Jobs = append(out.Jobs, job)
+		out.Total = total
+	}
+	if err := rows.Err(); err != nil {
+		return port.ListJobsOutput{}, fmt.Errorf("iterating listed jobs: %w", err)
+	}
+
+	return out, nil
+}
+
+func (r *JobRepository) Retry(ctx context.Context, id string) (domain.Job, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return domain.Job{}, fmt.Errorf("retrying job %s: %w", id, domain.ErrJobNotFound)
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.Job{}, fmt.Errorf("starting retry transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const updateQuery = `
+		UPDATE jobs
+		SET state = 'pending',
+		    attempts = 0,
+		    last_error = NULL,
+		    run_at = now(),
+		    lease_expires_at = NULL,
+		    worker_id = NULL,
+		    completed_at = NULL,
+		    updated_at = now()
+		WHERE id = $1 AND state = 'dead'
+		RETURNING id, queue, payload, state, attempts, max_attempts, run_at, lease_expires_at, worker_id, idempotency_key, last_error, created_at, updated_at, completed_at
+	`
+
+	row := tx.QueryRow(ctx, updateQuery, id)
+	job, err := scanJob(row)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return domain.Job{}, fmt.Errorf("retrying job %s: %w", id, err)
+		}
+
+		var state string
+		getErr := tx.QueryRow(ctx, `SELECT state FROM jobs WHERE id = $1`, id).Scan(&state)
+		if errors.Is(getErr, pgx.ErrNoRows) {
+			return domain.Job{}, fmt.Errorf("retrying job %s: %w", id, domain.ErrJobNotFound)
+		}
+		if getErr != nil {
+			return domain.Job{}, fmt.Errorf("checking job %s state for retry: %w", id, getErr)
+		}
+		return domain.Job{}, fmt.Errorf("retrying job %s from state %s: %w", id, state, domain.ErrInvalidTransition)
+	}
+
+	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, NewJobChannel, string(job.Queue)); err != nil {
+		return domain.Job{}, fmt.Errorf("notifying retry for job %s: %w", id, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Job{}, fmt.Errorf("committing retry transaction: %w", err)
+	}
+
+	return job, nil
+}
+
 func (r *JobRepository) Stats(ctx context.Context, queue domain.Queue) (port.QueueStats, error) {
 	const query = `
 		SELECT
@@ -434,6 +544,55 @@ func scanJobWithInserted(row scanner) (domain.Job, bool, error) {
 	}
 
 	return job, inserted, nil
+}
+
+func scanJobWithTotal(row scanner) (domain.Job, int64, error) {
+	var (
+		job            domain.Job
+		queue          string
+		state          string
+		payload        []byte
+		leaseExpiresAt *time.Time
+		workerID       *string
+		idempotencyKey *string
+		lastError      *string
+		completedAt    *time.Time
+		total          int64
+	)
+
+	if err := row.Scan(
+		&job.ID,
+		&queue,
+		&payload,
+		&state,
+		&job.Attempts,
+		&job.MaxAttempts,
+		&job.RunAt,
+		&leaseExpiresAt,
+		&workerID,
+		&idempotencyKey,
+		&lastError,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&completedAt,
+		&total,
+	); err != nil {
+		return domain.Job{}, 0, fmt.Errorf("scanning job row with total: %w", err)
+	}
+
+	compactPayload := json.RawMessage(payload)
+	job.Payload = append([]byte(nil), compactPayload...)
+	job.Queue = domain.Queue(queue)
+	job.State = domain.JobState(state)
+	job.LeaseExpiresAt = leaseExpiresAt
+	job.WorkerID = workerID
+	job.IdempotencyKey = idempotencyKey
+	job.CompletedAt = completedAt
+	if lastError != nil {
+		job.LastError = *lastError
+	}
+
+	return job, total, nil
 }
 
 func toPostgresInterval(value time.Duration) string {

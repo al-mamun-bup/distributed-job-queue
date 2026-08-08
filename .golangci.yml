@@ -1,3 +1,5 @@
+version: "2"
+
 run:
   timeout: 5m
 
@@ -8,3 +10,30 @@ linters:
     - staticcheck
     - revive
     - ineffassign
+  settings:
+    revive:
+      rules:
+        # Default revive rule set, minus "exported" and "package-comments":
+        # this project comments only where the WHY isn't obvious, not on
+        # every exported symbol.
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
