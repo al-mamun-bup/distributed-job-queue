@@ -2,6 +2,7 @@
 package http
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,10 +19,15 @@ type JobHandler struct {
 	enqueuer           *job.Enqueuer
 	query              *job.Query
 	defaultMaxAttempts int
+	log                *slog.Logger
 }
 
-func NewJobHandler(enqueuer *job.Enqueuer, query *job.Query, defaultMaxAttempts int) *JobHandler {
-	return &JobHandler{enqueuer: enqueuer, query: query, defaultMaxAttempts: defaultMaxAttempts}
+func NewJobHandler(enqueuer *job.Enqueuer, query *job.Query, defaultMaxAttempts int, log *slog.Logger) *JobHandler {
+	return &JobHandler{enqueuer: enqueuer, query: query, defaultMaxAttempts: defaultMaxAttempts, log: log}
+}
+
+func (h *JobHandler) requestID(c echo.Context) string {
+	return c.Response().Header().Get(echo.HeaderXRequestID)
 }
 
 func (h *JobHandler) Create(c echo.Context) error {
@@ -59,6 +65,9 @@ func (h *JobHandler) Create(c echo.Context) error {
 		return err
 	}
 
+	h.log.InfoContext(c.Request().Context(), "job enqueued",
+		"job_id", created.ID, "queue", string(created.Queue), "attempt", created.Attempts, "request_id", h.requestID(c))
+
 	return c.JSON(http.StatusCreated, toJobResponse(created))
 }
 
@@ -76,6 +85,10 @@ func (h *JobHandler) Retry(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+
+	h.log.InfoContext(c.Request().Context(), "job retried",
+		"job_id", j.ID, "queue", string(j.Queue), "attempt", j.Attempts, "request_id", h.requestID(c))
+
 	return c.JSON(http.StatusOK, toJobResponse(j))
 }
 

@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -13,14 +14,15 @@ import (
 type HandlerFunc func(ctx context.Context, job domain.Job) error
 
 type WorkerConfig struct {
-	WorkerID        string
-	Queues          []domain.Queue
-	Concurrency     int
-	BatchSize       int
-	PollInterval    time.Duration
-	LeaseTTL        time.Duration
-	JobTimeout      time.Duration
-	ShutdownTimeout time.Duration
+	WorkerID          string
+	Queues            []domain.Queue
+	Concurrency       int
+	BatchSize         int
+	PollInterval      time.Duration
+	LeaseTTL          time.Duration
+	HeartbeatInterval time.Duration
+	JobTimeout        time.Duration
+	ShutdownTimeout   time.Duration
 }
 
 type Worker struct {
@@ -28,14 +30,20 @@ type Worker struct {
 	processor  *Processor
 	handler    HandlerFunc
 	notifier   port.Notifier
+	metrics    port.MetricsRecorder
+	log        *slog.Logger
 	cfg        WorkerConfig
 }
 
-// NewWorker wires a claim loop for cfg.Queues. notifier may be nil, in which
-// case the worker falls back to pure polling at PollInterval.
-func NewWorker(repository port.JobRepository, processor *Processor, handler HandlerFunc, notifier port.Notifier, cfg WorkerConfig) (*Worker, error) {
+// NewWorker wires a claim loop for cfg.Queues. notifier and metrics may be
+// nil: a nil notifier falls back to pure polling at PollInterval, a nil
+// metrics disables metrics.
+func NewWorker(repository port.JobRepository, processor *Processor, handler HandlerFunc, notifier port.Notifier, metrics port.MetricsRecorder, log *slog.Logger, cfg WorkerConfig) (*Worker, error) {
 	if handler == nil {
 		return nil, fmt.Errorf("creating worker: handler is required")
+	}
+	if log == nil {
+		return nil, fmt.Errorf("creating worker: logger is required")
 	}
 	if len(cfg.Queues) == 0 {
 		return nil, fmt.Errorf("creating worker: at least one queue is required")
@@ -52,6 +60,14 @@ func NewWorker(repository port.JobRepository, processor *Processor, handler Hand
 	if cfg.LeaseTTL <= 0 {
 		return nil, fmt.Errorf("creating worker: lease ttl must be > 0")
 	}
+	if cfg.HeartbeatInterval < 0 {
+		return nil, fmt.Errorf("creating worker: heartbeat interval must be >= 0")
+	}
+	if cfg.HeartbeatInterval == 0 {
+		cfg.HeartbeatInterval = cfg.LeaseTTL / 3
+	} else if cfg.HeartbeatInterval >= cfg.LeaseTTL {
+		return nil, fmt.Errorf("creating worker: heartbeat interval must be < lease ttl")
+	}
 	if cfg.JobTimeout <= 0 {
 		return nil, fmt.Errorf("creating worker: job timeout must be > 0")
 	}
@@ -67,6 +83,8 @@ func NewWorker(repository port.JobRepository, processor *Processor, handler Hand
 		processor:  processor,
 		handler:    handler,
 		notifier:   notifier,
+		metrics:    metrics,
+		log:        log,
 		cfg:        cfg,
 	}, nil
 }
@@ -177,6 +195,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			pollBackoff = 10 * time.Millisecond
 
+			if w.metrics != nil {
+				w.metrics.ClaimBatch(string(queue), len(jobs))
+			}
+
 			for _, claimed := range jobs {
 				<-slots
 				recordStart(claimed.ID)
@@ -231,8 +253,13 @@ func (w *Worker) Run(ctx context.Context) error {
 		defer cancel()
 
 		jobIDs := snapshotInFlight()
-		if _, err := w.repository.ReleaseLeases(releaseCtx, w.cfg.WorkerID, jobIDs); err != nil {
+		released, err := w.repository.ReleaseLeases(releaseCtx, w.cfg.WorkerID, jobIDs)
+		if err != nil {
 			return fmt.Errorf("releasing still-held leases: %w", err)
+		}
+		if released > 0 {
+			w.log.WarnContext(releaseCtx, "shutdown timeout hit, released still-held leases",
+				"worker_id", w.cfg.WorkerID, "count", released)
 		}
 		return nil
 	}
@@ -242,10 +269,12 @@ func (w *Worker) processClaimedJob(parentCtx context.Context, job domain.Job) {
 	jobCtx, cancel := context.WithTimeout(parentCtx, w.cfg.JobTimeout)
 	defer cancel()
 
+	jobAttrs := []any{"job_id", job.ID, "queue", string(job.Queue), "attempt", job.Attempts}
+
 	heartbeatStop := make(chan struct{})
 	go func() {
 		defer close(heartbeatStop)
-		ticker := time.NewTicker(w.cfg.LeaseTTL / 3)
+		ticker := time.NewTicker(w.cfg.HeartbeatInterval)
 		defer ticker.Stop()
 
 		for {
@@ -254,31 +283,67 @@ func (w *Worker) processClaimedJob(parentCtx context.Context, job domain.Job) {
 				return
 			case <-ticker.C:
 				if err := w.repository.ExtendLease(jobCtx, job.ID, w.cfg.WorkerID, w.cfg.LeaseTTL); err != nil {
+					w.log.WarnContext(jobCtx, "extending lease failed", append(jobAttrs, "error", err)...)
 					return
 				}
 			}
 		}
 	}()
 
-	var handlerErr error
+	start := time.Now()
+	var (
+		handlerErr error
+		panicked   bool
+	)
 	func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				panicked = true
 				handlerErr = fmt.Errorf("handler panic: %v", recovered)
 			}
 		}()
 		handlerErr = w.handler(jobCtx, job)
 	}()
+	duration := time.Since(start)
 
 	cancel()
 	<-heartbeatStop
 
+	bgCtx := context.Background()
+
 	if handlerErr != nil {
-		if err := w.processor.HandleFailure(context.Background(), job, w.cfg.WorkerID, handlerErr); err != nil {
+		if panicked {
+			w.log.ErrorContext(bgCtx, "job handler panicked, recovered", append(jobAttrs, "error", handlerErr)...)
+		}
+
+		resultState, err := w.processor.HandleFailure(bgCtx, job, w.cfg.WorkerID, handlerErr)
+		if err != nil {
+			w.log.ErrorContext(bgCtx, "recording job failure failed", append(jobAttrs, "error", err)...)
 			return
+		}
+
+		result := "retried"
+		logLevel := slog.LevelWarn
+		if resultState == domain.JobStateDead {
+			result = "dead"
+			logLevel = slog.LevelError
+		}
+		w.log.Log(bgCtx, logLevel, "job failed",
+			append(jobAttrs, "result", result, "duration", duration.String(), "error", handlerErr)...)
+
+		if w.metrics != nil {
+			w.metrics.JobCompleted(string(job.Queue), result, duration)
 		}
 		return
 	}
 
-	_ = w.processor.HandleSuccess(context.Background(), job.ID, w.cfg.WorkerID)
+	if err := w.processor.HandleSuccess(bgCtx, job.ID, w.cfg.WorkerID); err != nil {
+		w.log.ErrorContext(bgCtx, "recording job success failed", append(jobAttrs, "error", err)...)
+		return
+	}
+
+	w.log.InfoContext(bgCtx, "job succeeded", append(jobAttrs, "duration", duration.String())...)
+	if w.metrics != nil {
+		w.metrics.JobCompleted(string(job.Queue), "succeeded", duration)
+	}
 }

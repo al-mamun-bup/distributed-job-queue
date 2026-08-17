@@ -22,6 +22,7 @@ import (
 	postgresrepo "hopper/internal/adapter/repository/postgres"
 	"hopper/internal/domain"
 	"hopper/internal/infrastructure/database"
+	"hopper/internal/infrastructure/metrics"
 	"hopper/internal/usecase/job"
 	"hopper/internal/usecase/port"
 )
@@ -51,12 +52,16 @@ func setupAPI(t *testing.T) (*echo.Echo, *postgresrepo.JobRepository) {
 	require.NoError(t, database.MigrateUp(ctx, pool))
 
 	repository := postgresrepo.NewJobRepository(pool)
-	enqueuer := job.NewEnqueuer(repository)
+
+	m := metrics.New()
+	m.RegisterQueueDepth(repository)
+
+	enqueuer := job.NewEnqueuer(repository, m)
 	query := job.NewQuery(repository)
 
-	jobHandler := NewJobHandler(enqueuer, query, 5)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e := NewRouter(jobHandler, pool, log, RouterConfig{RequestTimeout: 5 * time.Second, BodyLimit: "1M"})
+	jobHandler := NewJobHandler(enqueuer, query, 5, log)
+	e := NewRouter(jobHandler, pool, m.Registry, log, RouterConfig{RequestTimeout: 5 * time.Second, BodyLimit: "1M"})
 
 	return e, repository
 }
@@ -262,4 +267,24 @@ func TestHealthzAndReadyz(t *testing.T) {
 
 	rec = doRequest(e, "GET", "/readyz", nil, nil)
 	require.Equal(t, 200, rec.Code)
+}
+
+func TestMetricsEndpointReflectsActivity(t *testing.T) {
+	e, _ := setupAPI(t)
+
+	body, err := json.Marshal(map[string]any{
+		"queue":   "metrics-queue",
+		"payload": map[string]any{"n": 1},
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(e, "POST", "/v1/jobs", body, nil)
+	require.Equal(t, 201, rec.Code)
+
+	rec = doRequest(e, "GET", "/metrics", nil, nil)
+	require.Equal(t, 200, rec.Code)
+
+	out := rec.Body.String()
+	require.Contains(t, out, `hopper_jobs_enqueued_total{queue="metrics-queue"} 1`)
+	require.Contains(t, out, `hopper_queue_depth{queue="metrics-queue",state="pending"} 1`)
 }

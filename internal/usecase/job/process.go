@@ -39,12 +39,15 @@ func (p *Processor) SetJitterSource(jitter jitterFn) {
 	p.jitter = jitter
 }
 
-func (p *Processor) HandleFailure(ctx context.Context, job domain.Job, workerID string, handlerErr error) error {
+// HandleFailure records a handler error and returns the resulting state:
+// JobStatePending if another attempt is scheduled, JobStateDead if attempts
+// are exhausted.
+func (p *Processor) HandleFailure(ctx context.Context, job domain.Job, workerID string, handlerErr error) (domain.JobState, error) {
 	if handlerErr == nil {
-		return fmt.Errorf("handling failure for job %s: handler error is required", job.ID)
+		return "", fmt.Errorf("handling failure for job %s: handler error is required", job.ID)
 	}
 	if job.State != domain.JobStateRunning {
-		return fmt.Errorf("handling failure for job %s from state %s: %w", job.ID, job.State, domain.ErrInvalidTransition)
+		return "", fmt.Errorf("handling failure for job %s from state %s: %w", job.ID, job.State, domain.ErrInvalidTransition)
 	}
 
 	now := p.now().UTC()
@@ -59,23 +62,23 @@ func (p *Processor) HandleFailure(ctx context.Context, job domain.Job, workerID 
 		failInput.RunAt = job.RunAt
 		failInput.CompletedAt = &now
 		if err := p.repository.Fail(ctx, failInput); err != nil {
-			return fmt.Errorf("marking job %s dead: %w", job.ID, err)
+			return "", fmt.Errorf("marking job %s dead: %w", job.ID, err)
 		}
-		return nil
+		return domain.JobStateDead, nil
 	}
 
 	// Jitter prevents failed jobs from retrying at the exact same instant.
 	// Without it, an outage can trigger synchronized retries and a thundering herd.
 	nextRunAt, err := domain.ComputeNextRunAt(now, job.Attempts, p.retry, p.jitter())
 	if err != nil {
-		return fmt.Errorf("computing next run_at for job %s: %w", job.ID, err)
+		return "", fmt.Errorf("computing next run_at for job %s: %w", job.ID, err)
 	}
 	failInput.RunAt = nextRunAt
 
 	if err := p.repository.Fail(ctx, failInput); err != nil {
-		return fmt.Errorf("marking job %s retryable failure: %w", job.ID, err)
+		return "", fmt.Errorf("marking job %s retryable failure: %w", job.ID, err)
 	}
-	return nil
+	return domain.JobStatePending, nil
 }
 
 func (p *Processor) HandleSuccess(ctx context.Context, jobID, workerID string) error {

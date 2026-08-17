@@ -12,10 +12,12 @@ import (
 // Enqueuer accepts new jobs into the queue.
 type Enqueuer struct {
 	repository port.JobRepository
+	metrics    port.MetricsRecorder
 }
 
-func NewEnqueuer(repository port.JobRepository) *Enqueuer {
-	return &Enqueuer{repository: repository}
+// NewEnqueuer wires an Enqueuer. metrics may be nil to disable metrics.
+func NewEnqueuer(repository port.JobRepository, metrics port.MetricsRecorder) *Enqueuer {
+	return &Enqueuer{repository: repository, metrics: metrics}
 }
 
 // Enqueue persists a new job. If input.IdempotencyKey is set and already
@@ -32,5 +34,10 @@ func (e *Enqueuer) Enqueue(ctx context.Context, input port.EnqueueInput) (domain
 	if err != nil {
 		return domain.Job{}, fmt.Errorf("enqueuing job: %w", err)
 	}
+
+	if e.metrics != nil {
+		e.metrics.JobEnqueued(string(job.Queue))
+	}
+
 	return job, nil
 }

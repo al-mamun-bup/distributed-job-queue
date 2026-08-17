@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -18,6 +20,11 @@ import (
 	"hopper/internal/infrastructure/database"
 	"hopper/internal/usecase/port"
 )
+
+// testLogger discards output; these tests assert on state, not log lines.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func TestReaperRedeliversExpiredLease(t *testing.T) {
 	ctx := context.Background()
@@ -40,7 +47,8 @@ func TestReaperRedeliversExpiredLease(t *testing.T) {
 	_, err = pool.Exec(ctx, `UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, created.ID)
 	require.NoError(t, err)
 
-	reaper := NewReaper(repository, 100)
+	reaper, err := NewReaper(repository, 100, nil, testLogger())
+	require.NoError(t, err)
 	reaped, err := reaper.RunOnce(ctx)
 	require.NoError(t, err)
 	require.Len(t, reaped, 1)
@@ -91,8 +99,13 @@ func TestFailurePathDeadAfterMaxAttempts(t *testing.T) {
 		processor.SetClock(func() time.Time { return now })
 
 		failureErr := errors.New(fmt.Sprintf("attempt %d failed", attempt))
-		err = processor.HandleFailure(ctx, job, "worker-retry", failureErr)
+		resultState, err := processor.HandleFailure(ctx, job, "worker-retry", failureErr)
 		require.NoError(t, err)
+		if attempt < 5 {
+			require.Equal(t, domain.JobStatePending, resultState)
+		} else {
+			require.Equal(t, domain.JobStateDead, resultState)
+		}
 
 		updated, err := repository.Get(ctx, created.ID)
 		require.NoError(t, err)

@@ -10,6 +10,7 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -39,7 +40,7 @@ func (v *requestValidator) Validate(i any) error {
 // NewRouter wires middleware and routes onto a fresh Echo instance. DTOs and
 // domain-error-to-status mapping live in this package; nothing upstream of
 // the handler ever sees an HTTP status code.
-func NewRouter(jobHandler *JobHandler, pinger Pinger, log *slog.Logger, cfg RouterConfig) *echo.Echo {
+func NewRouter(jobHandler *JobHandler, pinger Pinger, registry *prometheus.Registry, log *slog.Logger, cfg RouterConfig) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -57,7 +58,7 @@ func NewRouter(jobHandler *JobHandler, pinger Pinger, log *slog.Logger, cfg Rout
 
 	e.GET("/healthz", healthzHandler)
 	e.GET("/readyz", readyzHandler(pinger))
-	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
+	e.GET("/metrics", echo.WrapHandler(promhttp.HandlerFor(registry, promhttp.HandlerOpts{})))
 
 	v1 := e.Group("/v1")
 	v1.POST("/jobs", jobHandler.Create)

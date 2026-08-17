@@ -20,6 +20,7 @@ type Config struct {
 	Reaper   ReaperConfig   `mapstructure:"reaper" validate:"required"`
 	Retry    RetryConfig    `mapstructure:"retry" validate:"required"`
 	Log      LogConfig      `mapstructure:"log" validate:"required"`
+	Metrics  MetricsConfig  `mapstructure:"metrics" validate:"required"`
 }
 
 // AppConfig defines application-level settings.
@@ -67,6 +68,13 @@ type WorkerConfig struct {
 type ReaperConfig struct {
 	Interval  time.Duration `mapstructure:"interval" validate:"gt=0"`
 	BatchSize int           `mapstructure:"batch_size" validate:"gt=0"`
+}
+
+// MetricsConfig defines the standalone /metrics listener used by processes
+// without their own HTTP server (the worker; the API serves /metrics on its
+// main port instead).
+type MetricsConfig struct {
+	Port int `mapstructure:"port" validate:"required,min=1,max=65535"`
 }
 
 // RetryConfig defines retry and backoff settings.

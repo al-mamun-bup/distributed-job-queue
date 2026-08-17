@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
+
+FROM alpine:3.20 AS runtime
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S hopper && adduser -S hopper -G hopper
+
+WORKDIR /app
+COPY --from=build /out/api /out/worker /out/migrate ./
+COPY config/config.example.yaml ./config/config.yaml
+
+USER hopper
+
+# Overridden per-service by docker-compose (api/worker/migrate).
+ENTRYPOINT ["/app/api"]

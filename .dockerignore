@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+bin
+dist
+coverage.out
+*.md
+Dockerfile
+docker-compose*.yml
+.dockerignore

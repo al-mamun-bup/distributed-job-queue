@@ -446,6 +446,34 @@ func (r *JobRepository) Stats(ctx context.Context, queue domain.Queue) (port.Que
 	return out, nil
 }
 
+func (r *JobRepository) QueueDepths(ctx context.Context) ([]port.QueueDepth, error) {
+	const query = `
+		SELECT queue, state, COUNT(*)::bigint
+		FROM jobs
+		GROUP BY queue, state
+	`
+
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("querying queue depths: %w", err)
+	}
+	defer rows.Close()
+
+	var out []port.QueueDepth
+	for rows.Next() {
+		var d port.QueueDepth
+		if err := rows.Scan(&d.Queue, &d.State, &d.Count); err != nil {
+			return nil, fmt.Errorf("scanning queue depth row: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating queue depths: %w", err)
+	}
+
+	return out, nil
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }

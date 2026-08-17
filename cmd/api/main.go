@@ -14,6 +14,7 @@ import (
 	"hopper/internal/infrastructure/config"
 	"hopper/internal/infrastructure/database"
 	"hopper/internal/infrastructure/logger"
+	"hopper/internal/infrastructure/metrics"
 	"hopper/internal/infrastructure/server"
 	"hopper/internal/usecase/job"
 )
@@ -48,11 +49,15 @@ func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	defer pool.Close()
 
 	repository := postgresrepo.NewJobRepository(pool)
-	enqueuer := job.NewEnqueuer(repository)
+
+	m := metrics.New()
+	m.RegisterQueueDepth(repository)
+
+	enqueuer := job.NewEnqueuer(repository, m)
 	query := job.NewQuery(repository)
 
-	jobHandler := httpadapter.NewJobHandler(enqueuer, query, cfg.Retry.MaxAttempts)
-	e := httpadapter.NewRouter(jobHandler, pool, log, httpadapter.RouterConfig{
+	jobHandler := httpadapter.NewJobHandler(enqueuer, query, cfg.Retry.MaxAttempts, log)
+	e := httpadapter.NewRouter(jobHandler, pool, m.Registry, log, httpadapter.RouterConfig{
 		RequestTimeout: cfg.Server.WriteTimeout,
 		BodyLimit:      cfg.Server.BodyLimit,
 	})

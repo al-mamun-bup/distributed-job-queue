@@ -44,7 +44,7 @@ func TestWorkerNotifyVsPollLatency(t *testing.T) {
 		}
 
 		processor := NewProcessor(repository, retryPolicy)
-		worker, err := NewWorker(repository, processor, handler, notifier, WorkerConfig{
+		worker, err := NewWorker(repository, processor, handler, notifier, nil, testLogger(), WorkerConfig{
 			WorkerID:        fmt.Sprintf("latency-%s", queue),
 			Queues:          []domain.Queue{queue},
 			Concurrency:     4,
@@ -122,7 +122,7 @@ func TestWorkerListenerDropDoesNotLoseJobs(t *testing.T) {
 		return nil
 	}
 
-	worker, err := NewWorker(repository, processor, handler, listener, WorkerConfig{
+	worker, err := NewWorker(repository, processor, handler, listener, nil, testLogger(), WorkerConfig{
 		WorkerID:        "listener-drop-test",
 		Queues:          []domain.Queue{"listener-drop"},
 		Concurrency:     4,

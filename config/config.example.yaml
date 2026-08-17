@@ -41,6 +41,9 @@ retry:
   max_delay: 1h
   jitter: 0.2
 
+metrics:
+  port: 9090
+
 log:
   level: info
   format: json

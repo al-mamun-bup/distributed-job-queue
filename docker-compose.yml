@@ -1,0 +1,61 @@
+name: hopper
+
+x-app-env: &app-env
+  HOPPER_DATABASE_HOST: postgres
+  HOPPER_DATABASE_PORT: "5432"
+  HOPPER_DATABASE_USER: hopper
+  HOPPER_DATABASE_PASSWORD: hopper
+  HOPPER_DATABASE_NAME: hopper
+  HOPPER_DATABASE_SSLMODE: disable
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hopper
+      POSTGRES_PASSWORD: hopper
+      POSTGRES_DB: hopper
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hopper -d hopper"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    entrypoint: ["/app/migrate"]
+    command: ["up"]
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    entrypoint: ["/app/api"]
+    environment:
+      <<: *app-env
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    entrypoint: ["/app/worker"]
+    environment:
+      <<: *app-env
+    ports:
+      - "9090:9090"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

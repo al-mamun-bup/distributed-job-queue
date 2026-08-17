@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"hopper/internal/infrastructure/config"
 	"hopper/internal/infrastructure/database"
 	"hopper/internal/infrastructure/logger"
+	"hopper/internal/infrastructure/metrics"
 	"hopper/internal/usecase/job"
 )
 
@@ -64,27 +66,69 @@ func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		return fmt.Errorf("creating queue listener: %w", err)
 	}
 
-	worker, err := job.NewWorker(repository, processor, defaultHandler(log), notifier, job.WorkerConfig{
-		WorkerID:        cfg.Worker.ID,
-		Queues:          queues,
-		Concurrency:     cfg.Worker.Concurrency,
-		BatchSize:       cfg.Worker.BatchSize,
-		PollInterval:    cfg.Worker.PollInterval,
-		LeaseTTL:        cfg.Worker.LeaseTTL,
-		JobTimeout:      cfg.Worker.JobTimeout,
-		ShutdownTimeout: cfg.App.ShutdownTimeout,
+	m := metrics.New()
+	m.RegisterQueueDepth(repository)
+
+	worker, err := job.NewWorker(repository, processor, defaultHandler(log), notifier, m, log, job.WorkerConfig{
+		WorkerID:          cfg.Worker.ID,
+		Queues:            queues,
+		Concurrency:       cfg.Worker.Concurrency,
+		BatchSize:         cfg.Worker.BatchSize,
+		PollInterval:      cfg.Worker.PollInterval,
+		LeaseTTL:          cfg.Worker.LeaseTTL,
+		HeartbeatInterval: cfg.Worker.HeartbeatInterval,
+		JobTimeout:        cfg.Worker.JobTimeout,
+		ShutdownTimeout:   cfg.App.ShutdownTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("creating worker: %w", err)
 	}
 
-	log.Info("worker started", "worker_id", cfg.Worker.ID, "queues", cfg.Worker.Queues, "concurrency", cfg.Worker.Concurrency)
+	reaper, err := job.NewReaper(repository, cfg.Reaper.BatchSize, m, log)
+	if err != nil {
+		return fmt.Errorf("creating reaper: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		runReaperLoop(ctx, reaper, cfg.Reaper.Interval, log)
+	}()
+	go func() {
+		defer wg.Done()
+		if err := metrics.Serve(ctx, m.Registry, cfg.Metrics.Port); err != nil {
+			log.Error("metrics server exited with error", "error", err)
+		}
+	}()
+
+	log.Info("worker started",
+		"worker_id", cfg.Worker.ID, "queues", cfg.Worker.Queues, "concurrency", cfg.Worker.Concurrency, "metrics_port", cfg.Metrics.Port)
 	startedAt := time.Now()
-	if err := worker.Run(ctx); err != nil {
-		return fmt.Errorf("running worker: %w", err)
+	workerErr := worker.Run(ctx)
+	wg.Wait()
+
+	if workerErr != nil {
+		return fmt.Errorf("running worker: %w", workerErr)
 	}
 	log.Info("worker stopped", "uptime", time.Since(startedAt).String())
 	return nil
+}
+
+func runReaperLoop(ctx context.Context, reaper *job.Reaper, interval time.Duration, log *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := reaper.RunOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error("reaping expired leases", "error", err)
+			}
+		}
+	}
 }
 
 func defaultHandler(log *slog.Logger) job.HandlerFunc {

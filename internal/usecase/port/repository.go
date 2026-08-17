@@ -51,6 +51,14 @@ type QueueStats struct {
 	UpdatedAt time.Time
 }
 
+// QueueDepth is one (queue, state) job count, the source of the
+// hopper_queue_depth gauge.
+type QueueDepth struct {
+	Queue string
+	State string
+	Count int64
+}
+
 // Notifier wakes a waiting worker when a new job may be available. It is a
 // latency optimisation, not a delivery guarantee: a dropped or missed signal
 // must never lose a job, since run_at <= now() polling is what actually
@@ -79,4 +87,7 @@ type JobRepository interface {
 	// if the job exists but isn't dead, ErrJobNotFound if it doesn't exist.
 	Retry(ctx context.Context, id string) (domain.Job, error)
 	Stats(ctx context.Context, queue domain.Queue) (QueueStats, error)
+	// QueueDepths returns the current job count for every (queue, state)
+	// combination present, for the hopper_queue_depth gauge.
+	QueueDepths(ctx context.Context) ([]QueueDepth, error)
 }

@@ -3,10 +3,12 @@ SHELL := /bin/bash
 .PHONY: serve dev build test test-int lint migrate-up migrate-down down logs bench
 
 serve:
-	@echo "TODO(phase-8): docker compose up --build, wait healthy, migrate"
+	docker compose up --build -d
+	docker compose logs -f api worker
 
 dev:
-	@echo "TODO(phase-8): run api + worker locally with Postgres in Docker"
+	docker compose up -d postgres
+	@echo "postgres up on localhost:5432 - run 'make migrate-up' then 'go run ./cmd/api' / 'go run ./cmd/worker'"
 
 build:
 	go build ./cmd/...
@@ -27,10 +29,10 @@ migrate-down:
 	go run ./cmd/migrate down
 
 down:
-	@echo "TODO(phase-8): stop stack and remove volumes"
+	docker compose down -v
 
 logs:
-	@echo "TODO(phase-8): stream compose logs"
+	docker compose logs -f
 
 bench:
 	go run ./cmd/bench
